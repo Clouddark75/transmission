@@ -146,6 +146,7 @@ jobs:
       # -------------------------------------------------------
       # 8. Comprobar archivos instalados
       # -------------------------------------------------------
+
       - name: Verify installation
         shell: bash
         run: |
@@ -159,8 +160,7 @@ jobs:
             "$PREFIX/bin/transmission-create"
             "$PREFIX/bin/transmission-edit"
             "$PREFIX/bin/transmission-show"
-            "$PREFIX/share/transmission/web/index.html"
-            "$PREFIX/share/transmission/web/transmission-app.js"
+            "$PREFIX/share/transmission/public_html/index.html"
           )
 
           for file in "${REQUIRED_FILES[@]}"; do
@@ -171,6 +171,21 @@ jobs:
 
             echo "OK: $file"
           done
+
+          echo
+          echo "=== WebUI files ==="
+          find "$PREFIX/share/transmission/public_html" -maxdepth 2 -type f | head -40
+
+          echo
+          echo "=== Verify sequential download in compiled WebUI ==="
+
+          if ! grep -R -q "sequential_download" \
+            "$PREFIX/share/transmission/public_html"; then
+            echo "::error::Sequential download option not found in compiled WebUI."
+            exit 1
+          fi
+
+          echo "OK: Sequential download found in compiled WebUI."
 
           echo
           echo "=== Transmission version ==="
