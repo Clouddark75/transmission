@@ -1,0 +1,253 @@
+name: Build Transmission for Google Colab
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: "Branch or tag to compile"
+        required: true
+        default: "main"
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: transmission-colab-${{ github.workflow }}-${{ inputs.source_ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Linux x86_64 - Colab
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+
+    steps:
+      # -------------------------------------------------------
+      # 1. Obtener el código de tu fork
+      # -------------------------------------------------------
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_ref }}
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Identify source revision
+        id: source
+        shell: bash
+        run: |
+          echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "short_commit=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+
+          echo "Branch/ref: ${{ inputs.source_ref }}"
+          echo "Commit: $(git rev-parse HEAD)"
+          echo "Date: $(git log -1 --format=%cI)"
+
+      # -------------------------------------------------------
+      # 2. Dependencias
+      # -------------------------------------------------------
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+
+          sudo apt-get install -y \
+            build-essential \
+            cmake \
+            ninja-build \
+            pkg-config \
+            git \
+            curl \
+            libcurl4-openssl-dev \
+            libssl-dev \
+            zlib1g-dev \
+            libevent-dev \
+            libminiupnpc-dev \
+            libnatpmp-dev \
+            libpsl-dev \
+            libdeflate-dev \
+            libb64-dev \
+            libsystemd-dev
+
+      # -------------------------------------------------------
+      # 3. Node.js para reconstruir la WebUI
+      # -------------------------------------------------------
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Show toolchain versions
+        run: |
+          cmake --version
+          ninja --version
+          node --version
+          npm --version
+          gcc --version
+
+      # -------------------------------------------------------
+      # 4. Verificar modificación de descarga secuencial
+      # -------------------------------------------------------
+      - name: Verify sequential download modification
+        shell: bash
+        run: |
+          test -f web/src/open-dialog.js
+
+          if ! grep -q "sequential_download" web/src/open-dialog.js; then
+            echo "::error::The sequential download modification was not found."
+            echo "Commit the modified web/src/open-dialog.js before building."
+            exit 1
+          fi
+
+          echo "Sequential download modification found."
+
+      # -------------------------------------------------------
+      # 5. Configurar CMake
+      # -------------------------------------------------------
+      - name: Configure Transmission
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX=/usr/local \
+            -DENABLE_DAEMON=ON \
+            -DENABLE_UTILS=ON \
+            -DENABLE_CLI=OFF \
+            -DENABLE_GTK=OFF \
+            -DENABLE_QT=OFF \
+            -DENABLE_MAC=OFF \
+            -DENABLE_TESTS=OFF \
+            -DENABLE_WERROR=OFF \
+            -DRUN_CLANG_TIDY=OFF \
+            -DREBUILD_WEB=ON \
+            -DINSTALL_WEB=ON \
+            -DINSTALL_DOC=OFF \
+            -DINSTALL_LIB=OFF
+
+      # -------------------------------------------------------
+      # 6. Compilar servidor y WebUI
+      # -------------------------------------------------------
+      - name: Build Transmission
+        run: |
+          cmake --build build --parallel 2
+
+      # -------------------------------------------------------
+      # 7. Instalar en directorio temporal
+      # -------------------------------------------------------
+      - name: Install Transmission
+        shell: bash
+        run: |
+          mkdir -p package
+
+          DESTDIR="$GITHUB_WORKSPACE/package" \
+            cmake --install build --prefix /usr/local
+
+      # -------------------------------------------------------
+      # 8. Comprobar archivos instalados
+      # -------------------------------------------------------
+      - name: Verify installation
+        shell: bash
+        run: |
+          set -e
+
+          PREFIX="package/usr/local"
+
+          REQUIRED_FILES=(
+            "$PREFIX/bin/transmission-daemon"
+            "$PREFIX/bin/transmission-remote"
+            "$PREFIX/bin/transmission-create"
+            "$PREFIX/bin/transmission-edit"
+            "$PREFIX/bin/transmission-show"
+            "$PREFIX/share/transmission/web/index.html"
+            "$PREFIX/share/transmission/web/transmission-app.js"
+          )
+
+          for file in "${REQUIRED_FILES[@]}"; do
+            if [ ! -f "$file" ]; then
+              echo "::error::Missing file: $file"
+              exit 1
+            fi
+
+            echo "OK: $file"
+          done
+
+          echo
+          echo "=== Transmission version ==="
+          "$PREFIX/bin/transmission-daemon" --version
+
+          echo
+          echo "=== Dynamic library check ==="
+
+          for binary in "$PREFIX"/bin/*; do
+            [ -f "$binary" ] || continue
+
+            if file "$binary" | grep -q ELF; then
+              if ldd "$binary" | grep -q "not found"; then
+                echo "::error::Missing dynamic library in $binary"
+                ldd "$binary"
+                exit 1
+              fi
+            fi
+          done
+
+          echo "All dynamic libraries resolved."
+
+      # -------------------------------------------------------
+      # 9. Información de compilación
+      # -------------------------------------------------------
+      - name: Generate build information
+        shell: bash
+        run: |
+          mkdir -p package
+
+          {
+            echo "Transmission Colab Build"
+            echo "========================"
+            echo
+            echo "Repository: $GITHUB_REPOSITORY"
+            echo "Ref: ${{ inputs.source_ref }}"
+            echo "Commit: ${{ steps.source.outputs.commit }}"
+            echo "Short commit: ${{ steps.source.outputs.short_commit }}"
+            echo "Architecture: x86_64"
+            echo "Runner: Ubuntu 22.04"
+            echo "Build type: Release"
+            echo "WebUI: Rebuilt from source"
+            echo "Sequential download: Enabled in WebUI"
+            echo
+            echo "Version:"
+            package/usr/local/bin/transmission-daemon --version
+          } > package/BUILD-INFO.txt
+
+      # -------------------------------------------------------
+      # 10. Crear paquete para Colab
+      # -------------------------------------------------------
+      - name: Create Colab package
+        shell: bash
+        run: |
+          cd package/usr/local
+
+          tar -czf "$GITHUB_WORKSPACE/transmission-colab-linux-x86_64.tar.gz" .
+
+          cd "$GITHUB_WORKSPACE"
+
+          echo "=== Package information ==="
+          ls -lh transmission-colab-linux-x86_64.tar.gz
+
+          echo
+          echo "=== Package contents ==="
+          tar -tzf transmission-colab-linux-x86_64.tar.gz | head -80
+
+      # -------------------------------------------------------
+      # 11. Publicar como Artifact de Actions
+      # -------------------------------------------------------
+      - name: Upload Transmission package
+        uses: actions/upload-artifact@v4
+        with:
+          name: transmission-colab-linux-x86_64-${{ steps.source.outputs.short_commit }}
+          path: |
+            transmission-colab-linux-x86_64.tar.gz
+            package/BUILD-INFO.txt
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30
