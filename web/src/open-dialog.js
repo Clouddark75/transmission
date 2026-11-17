@@ -65,8 +65,15 @@ export class OpenDialog extends EventTarget {
 
   _onConfirm() {
     const { controller, elements, remote } = this;
-    const { file_input, folder_input, start_input, url_input } = elements;
+    const {
+      file_input,
+      folder_input,
+      sequential_input,
+      start_input,
+      url_input,
+    } = elements;
     const paused = !start_input.checked;
+    const sequential_download = sequential_input.checked;
     const destination = folder_input.value.trim();
 
     for (const file of file_input.files) {
@@ -86,6 +93,7 @@ export class OpenDialog extends EventTarget {
             download_dir: destination,
             metainfo: contents.slice(Math.max(0, index + key.length)),
             paused,
+            sequential_download,
           },
         };
         remote.sendRequest(o, (response) => {
@@ -117,6 +125,7 @@ export class OpenDialog extends EventTarget {
           download_dir: destination,
           filename: url,
           paused,
+          sequential_download,
         },
       };
       remote.sendRequest(o, (payload) => {
@@ -208,6 +217,19 @@ export class OpenDialog extends EventTarget {
     label.id = 'auto-start-label';
     label.setAttribute('for', check.id);
     label.textContent = 'Start when added';
+    checkarea.append(label);
+
+    const sequential_check = document.createElement('input');
+    sequential_check.type = 'checkbox';
+    sequential_check.id = 'sequential-download-check';
+    sequential_check.checked = false;
+    checkarea.append(sequential_check);
+    elements.sequential_input = sequential_check;
+
+    label = document.createElement('label');
+    label.id = 'sequential-download-label';
+    label.setAttribute('for', sequential_check.id);
+    label.textContent = 'Download sequentially';
     checkarea.append(label);
 
     return elements;
